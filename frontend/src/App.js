@@ -4,7 +4,10 @@ import { Input } from './components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
 import { Badge } from './components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
-import { Send, Shield, Users, QrCode, Camera, Lock, Unlock } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from './components/ui/dialog';
+import { Send, Shield, Users, QrCode, Camera, Lock, Unlock, X } from 'lucide-react';
+import QRCode from 'react-qr-code';
+import QrScanner from 'qr-scanner';
 import './App.css';
 
 const App = () => {
@@ -27,6 +30,14 @@ const App = () => {
   const [keyPair, setKeyPair] = useState(null);
   const [sharedKey, setSharedKey] = useState(null);
   const [encryptionEnabled, setEncryptionEnabled] = useState(false);
+  
+  // QR Code state
+  const [showQRCode, setShowQRCode] = useState(false);
+  const [showQRScanner, setShowQRScanner] = useState(false);
+  const [qrData, setQrData] = useState('');
+  const [cameraError, setCameraError] = useState('');
+  const videoRef = useRef(null);
+  const qrScannerRef = useRef(null);
 
   // Generate crypto key pair on mount
   useEffect(() => {
@@ -158,6 +169,16 @@ const App = () => {
       setIsHost(true);
       setConnectionStatus('waiting');
       
+      // Create QR code data with offer
+      const qrCodeData = JSON.stringify({
+        type: 'connection_offer',
+        id: connectionId,
+        offer: offer,
+        timestamp: Date.now()
+      });
+      
+      setQrData(qrCodeData);
+      
       console.log('✓ Hosting connection:', connectionId);
       console.log('Share this offer with peer:', JSON.stringify(offer));
       
@@ -182,7 +203,7 @@ const App = () => {
         offer = JSON.parse(remoteOfferId);
       } catch {
         // For now, just show error - in real app you'd lookup offer by ID
-        alert('Please paste the full offer JSON for now');
+        alert('Please paste the full offer JSON or scan QR code');
         return;
       }
       
@@ -311,6 +332,79 @@ const App = () => {
     setCurrentMessage('');
   };
 
+  // QR Scanner functions
+  const startQRScanner = async () => {
+    try {
+      setCameraError('');
+      setShowQRScanner(true);
+      
+      // Wait for dialog to open and video element to be available
+      setTimeout(async () => {
+        if (videoRef.current) {
+          const qrScanner = new QrScanner(
+            videoRef.current,
+            (result) => {
+              console.log('QR Code detected:', result);
+              handleQRCodeScan(result.data);
+              stopQRScanner();
+            },
+            {
+              returnDetailedScanResult: true,
+              highlightScanRegion: true,
+              highlightCodeOutline: true,
+            }
+          );
+          
+          qrScannerRef.current = qrScanner;
+          await qrScanner.start();
+        }
+      }, 100);
+    } catch (error) {
+      console.error('Camera access failed:', error);
+      setCameraError('Camera access denied. Please allow camera access and try again.');
+    }
+  };
+
+  const stopQRScanner = () => {
+    if (qrScannerRef.current) {
+      qrScannerRef.current.stop();
+      qrScannerRef.current.destroy();
+      qrScannerRef.current = null;
+    }
+    setShowQRScanner(false);
+    setCameraError('');
+  };
+
+  const handleQRCodeScan = async (data) => {
+    try {
+      const qrContent = JSON.parse(data);
+      
+      if (qrContent.type === 'connection_offer' && qrContent.offer) {
+        console.log('Processing connection offer from QR code...');
+        
+        const connection = createConnection();
+        localConnection.current = connection;
+        
+        await connection.setRemoteDescription(qrContent.offer);
+        
+        const answer = await connection.createAnswer();
+        await connection.setLocalDescription(answer);
+        
+        setConnectionStatus('connecting');
+        setChatPartner(qrContent.id || 'Unknown');
+        
+        console.log('✓ Connection established from QR code');
+        alert('Connection established! You can now start chatting.');
+        
+      } else {
+        alert('Invalid QR code. Please scan a valid connection QR code.');
+      }
+    } catch (error) {
+      console.error('Failed to process QR code:', error);
+      alert('Invalid QR code format. Please scan a valid connection QR code.');
+    }
+  };
+
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -363,27 +457,118 @@ const App = () => {
                 </CardTitle>
               </CardHeader>
               <CardContent className="setup-content">
-                <div className="connection-buttons">
-                  <Button onClick={hostConnection} className="host-button">
-                    <Shield className="button-icon" />
-                    Host New Chat
-                  </Button>
-                  <Button onClick={joinConnection} variant="outline" className="join-button">
-                    <Users className="button-icon" />
-                    Join Existing Chat
-                  </Button>
-                </div>
-                
-                {isHost && peerId && (
-                  <div className="connection-info">
-                    <Badge variant="secondary" className="peer-id-badge">
-                      Connection ID: {peerId}
-                    </Badge>
-                    <p className="connection-hint">
-                      Share this ID with your peer to connect
-                    </p>
-                  </div>
-                )}
+                <Tabs defaultValue="host" className="connection-tabs">
+                  <TabsList className="tabs-list">
+                    <TabsTrigger value="host">Host Chat</TabsTrigger>
+                    <TabsTrigger value="join">Join Chat</TabsTrigger>
+                    <TabsTrigger value="qr">QR Scanner</TabsTrigger>
+                  </TabsList>
+                  
+                  <TabsContent value="host" className="tab-content">
+                    <div className="connection-methods">
+                      <Button onClick={hostConnection} className="host-button">
+                        <Shield className="button-icon" />
+                        Host New Chat
+                      </Button>
+                      
+                      {isHost && peerId && (
+                        <div className="connection-info">
+                          <Badge variant="secondary" className="peer-id-badge">
+                            Connection ID: {peerId}
+                          </Badge>
+                          
+                          <div className="qr-actions">
+                            <Dialog open={showQRCode} onOpenChange={setShowQRCode}>
+                              <DialogTrigger asChild>
+                                <Button variant="outline" className="qr-button">
+                                  <QrCode className="button-icon" />
+                                  Show QR Code
+                                </Button>
+                              </DialogTrigger>
+                              <DialogContent className="qr-dialog">
+                                <DialogHeader>
+                                  <DialogTitle>Scan to Connect</DialogTitle>
+                                </DialogHeader>
+                                <div className="qr-code-container">
+                                  <QRCode
+                                    value={qrData}
+                                    size={256}
+                                    style={{ height: "auto", maxWidth: "100%", width: "100%" }}
+                                    viewBox={`0 0 256 256`}
+                                  />
+                                </div>
+                                <p className="qr-instructions">
+                                  Have your peer scan this QR code to connect instantly
+                                </p>
+                              </DialogContent>
+                            </Dialog>
+                          </div>
+                          
+                          <p className="connection-hint">
+                            Share the connection ID or QR code with your peer
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </TabsContent>
+                  
+                  <TabsContent value="join" className="tab-content">
+                    <div className="connection-methods">
+                      <Button onClick={joinConnection} variant="outline" className="join-button">
+                        <Users className="button-icon" />
+                        Join with ID/Offer
+                      </Button>
+                      <p className="join-hint">
+                        Enter the connection ID or paste the offer JSON
+                      </p>
+                    </div>
+                  </TabsContent>
+                  
+                  <TabsContent value="qr" className="tab-content">
+                    <div className="connection-methods">
+                      <Dialog open={showQRScanner} onOpenChange={(open) => {
+                        if (!open) stopQRScanner();
+                        else startQRScanner();
+                      }}>
+                        <DialogTrigger asChild>
+                          <Button variant="outline" className="scan-button">
+                            <Camera className="button-icon" />
+                            Scan QR Code
+                          </Button>
+                        </DialogTrigger>
+                        <DialogContent className="qr-scanner-dialog">
+                          <DialogHeader>
+                            <DialogTitle>Scan Connection QR Code</DialogTitle>
+                          </DialogHeader>
+                          <div className="qr-scanner-container">
+                            {cameraError ? (
+                              <div className="camera-error">
+                                <p>{cameraError}</p>
+                                <Button onClick={startQRScanner} variant="outline">
+                                  Try Again
+                                </Button>
+                              </div>
+                            ) : (
+                              <video 
+                                ref={videoRef} 
+                                className="qr-scanner-video"
+                                autoPlay
+                                muted
+                                playsInline
+                              />
+                            )}
+                          </div>
+                          <p className="scanner-instructions">
+                            Point your camera at the QR code to connect
+                          </p>
+                        </DialogContent>
+                      </Dialog>
+                      <p className="scan-hint">
+                        Scan your peer's QR code to connect instantly
+                      </p>
+                    </div>
+                  </TabsContent>
+                </Tabs>
               </CardContent>
             </Card>
             
@@ -401,7 +586,7 @@ const App = () => {
               <div className="feature-card">
                 <QrCode className="feature-icon" />
                 <h3>QR Code Exchange</h3>
-                <p>Easy contact sharing (coming soon)</p>
+                <p>Easy contact sharing with camera</p>
               </div>
             </div>
           </div>
